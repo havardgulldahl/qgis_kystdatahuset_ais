@@ -23,10 +23,10 @@ hasProcessingProvider=no
 # changelog=
 
 # Tags are comma separated with spaces allowed
-tags=python ais
+tags=ais
 
 homepage=http://homepage
-category=Plugins
+category=Web
 icon=icon.png
 # experimental flag
 experimental=True
