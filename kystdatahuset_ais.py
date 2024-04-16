@@ -2,11 +2,14 @@ import json
 
 import requests
 from qgis.core import (
+    Qgis,
     QgsFeature,
     QgsField,
     QgsGeometry,
+    QgsMessageLog,
     QgsPointXY,
     QgsProject,
+    QgsSettings,
     QgsVectorLayer,
 )
 from qgis.gui import QgsOptionsPageWidget, QgsOptionsWidgetFactory
@@ -36,10 +39,6 @@ class MyPluginOptionsFactory(QgsOptionsWidgetFactory):
 
     def createWidget(self, parent):
         return ConfigOptionsPage(parent)
-
-
-from qgis.PyQt.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QLineEdit
-from qgis.core import QgsSettings, QgsLogger
 
 
 class ConfigOptionsPage(QgsOptionsPageWidget):
@@ -126,6 +125,13 @@ class KystdatahusetAIS:
         # disconnect form signal of the canvas
         self.iface.mapCanvas().renderComplete.disconnect(self.renderTest)
 
+    def messagebar(self, message, error=False):
+        self.iface.messageBar().pushMessage(
+            "Kystdatahuset AIS:",
+            message,
+            level=Qgis.Info if not error else Qgis.Critical,
+        )
+
     def login(self, username, password):
         auth_url = KDWS + "api/auth/login"
         self.session = requests.Session()
@@ -145,16 +151,16 @@ class KystdatahusetAIS:
                 "Authorization": f"Bearer {access_token}",
             }
             self.session.headers.update(headers)
-            QgsLogger.debug(
+            QgsMessageLog.logMessage(
                 f"Logged in successfully with token: {access_token[:10]}..."
             )
         except Exception as e:
-            QMessageBox.critical(None, "Error", f"Error authenticating: {e}")
+            self.messagebar(f"Error authenticating: {e}", error=True)
         return self.session
 
     def renderTest(self, painter):
         # use painter for drawing to map canvas
-        QgsLogger.debug("TestPlugin: renderTest called!")
+        QgsMessageLog.logMessage("TestPlugin: renderTest called!")
 
     def run(self):
         settings = QgsSettings()
@@ -192,11 +198,11 @@ class KystdatahusetAIS:
             if not result["success"]:
                 raise Exception(result["msg"])
         except Exception as e:
-            QMessageBox.critical(None, "Error", f"Error querying AIS positions: {e}")
+            self.messagebar(f"Error querying AIS positions: {e}", error=True)
             return
 
         positions = result["data"]
-        QgsLogger.debug(f"Received {len(positions)} positions for MMSI {mmsi}")
+        QgsMessageLog.logMessage(f"Received {len(positions)} positions for MMSI {mmsi}")
         # Create a memory layer to display the AIS positions
         uri = (
             "Point?crs=epsg:4326&"
@@ -235,7 +241,7 @@ class KystdatahusetAIS:
 
         # Iterate over the JSON data and add features to the layer
         for row in result:
-            QgsLogger.debug(row)
+            QgsMessageLog.logMessage(row)
             feature = QgsFeature()
             feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(row["x"], row["y"])))
             feature.setAttributes([row["id"], row["name"], row["value"]])
@@ -246,4 +252,4 @@ class KystdatahusetAIS:
 
         # Add the layer to the project
         QgsProject.instance().addMapLayer(vl)
-        QgsLogger.debug("Layer added to project")
+        QgsMessageLog.logMessage("Layer added to project")
