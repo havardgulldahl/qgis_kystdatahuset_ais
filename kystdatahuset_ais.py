@@ -1,6 +1,8 @@
 import json
 
 import requests
+from qgis.PyQt.QtCore import Qt
+
 from qgis.core import (
     Qgis,
     QgsFeature,
@@ -11,22 +13,58 @@ from qgis.core import (
     QgsProject,
     QgsSettings,
     QgsVectorLayer,
+    QgsTask,
+    QgsApplication,
 )
-from qgis.gui import QgsOptionsPageWidget, QgsOptionsWidgetFactory
+from qgis.gui import (
+    QgisInterface,
+    QgsMessageBarItem,
+    QgsOptionsPageWidget,
+    QgsOptionsWidgetFactory,
+)
 from qgis.PyQt.QtCore import QCoreApplication, QVariant
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
     QAction,
+    QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressBar,
     QVBoxLayout,
     QWidget,
 )
 
 KDWS = "https://kystdatahuset.no/ws/"
+
+
+def get_positions(task, session, data):
+    """
+    Raises an exception to abort the task.
+    Returns a result if success.
+    The result will be passed, together with the exception (None in
+    the case of success), to the on_finished method.
+    If there is an exception, there will be no result.
+    """
+
+    if task.isCanceled():
+        return None
+    # Query the AIS positions endpoint with the access token
+    api_url = KDWS + "api/ais/positions/for-mmsis-time"
+    api_response = session.post(api_url, data=json.dumps(data))
+    api_response.raise_for_status()  # Raise an exception for 4xx or 5xx status codes
+    result = api_response.json()
+    if not result["success"]:
+        raise Exception(result["msg"])
+    positions = result["data"]
+    return {
+        "positions": positions,
+        "mmsi": data["mmsiIds"][0],
+        "task": task.description(),
+    }
 
 
 class MyPluginOptionsFactory(QgsOptionsWidgetFactory):
@@ -132,6 +170,18 @@ class KystdatahusetAIS:
             level=Qgis.Info if not error else Qgis.Critical,
         )
 
+    def progressbar(self, message):
+        # Create a progress bar in the QGIS message bar
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        progress_msg: QgsMessageBarItem = self.iface.messageBar().createMessage(
+            "Download Progress: "
+        )
+        progress_msg.layout().addWidget(self.progress_bar)
+        self.iface.messageBar().pushWidget(progress_msg, Qgis.Info)
+
     def login(self, username, password):
         auth_url = KDWS + "api/auth/login"
         self.session = requests.Session()
@@ -171,7 +221,6 @@ class KystdatahusetAIS:
         else:
             session = self.session
 
-        api_url = KDWS + "api/ais/positions/for-mmsis-time"
         settings = QgsSettings()
         last_mmsi = settings.value("KDWS/last_mmsi", 0)
         try:
@@ -191,18 +240,33 @@ class KystdatahusetAIS:
                 # "minSpeed": 0.5,
             }
 
-            # Query the AIS positions endpoint with the access token
-            api_response = session.post(api_url, data=json.dumps(data))
-            api_response.raise_for_status()  # Raise an exception for 4xx or 5xx status codes
-            result = api_response.json()
-            if not result["success"]:
-                raise Exception(result["msg"])
+            task = QgsTask.fromFunction(
+                "Query AIS positions",
+                get_positions,
+                session=session,
+                data=data,
+                on_finished=self.create_layer,
+            )
+            QgsApplication.taskManager().addTask(task)
+
         except Exception as e:
             self.messagebar(f"Error querying AIS positions: {e}", error=True)
             return
 
-        positions = result["data"]
-        QgsMessageLog.logMessage(f"Received {len(positions)} positions for MMSI {mmsi}")
+    def create_layer(self, exception, result=None):
+        """This is called when doSomething is finished.
+        Exception is not None if doSomething raises an exception.
+        result is the return value of doSomething."""
+        if exception is not None:
+            self.messagebar(f"Error querying AIS positions: {exception}", error=True)
+            raise exception
+        if result is None:
+            self.messagebar("No result returned", error=True)
+            return
+
+        self.messagebar(
+            f"Task '{result['task']}' completed successfully, fetching {len(result['positions'])} positions"
+        )
         # Create a memory layer to display the AIS positions
         uri = (
             "Point?crs=epsg:4326&"
@@ -219,7 +283,7 @@ class KystdatahusetAIS:
             "index=yes"
         )
         vl = QgsVectorLayer(uri, "API Points", "memory")
-        vl.setCustomProperty("MMSI", mmsi)
+        vl.setCustomProperty("MMSI", result["mmsi"])
         pr = vl.dataProvider()
 
         # Add fields to the layer
@@ -240,7 +304,7 @@ class KystdatahusetAIS:
         vl.updateFields()
 
         # Iterate over the JSON data and add features to the layer
-        for row in result:
+        for row in result["positions"]:
             QgsMessageLog.logMessage(row)
             feature = QgsFeature()
             feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(row["x"], row["y"])))
