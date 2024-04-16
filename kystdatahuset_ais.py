@@ -30,6 +30,26 @@ from qgis.PyQt.QtWidgets import (
 )
 
 KDWS = "https://kystdatahuset.no/ws/"
+POSITIONS_AREA = "https://kystdatahuset.no/ws/api/ais/positions/within-bbox-time"
+POSITIONS_MMSI = "https://kystdatahuset.no/ws/api/ais/positions/for-mmsis-time"
+TRACK_BY_MMSI_URL = "https://kystdatahuset.no/ws/api/tracks/for-ships/by-mmsi"
+TRACK_BY_GEOM_URL = "https://kystdatahuset.no/ws/api/tracks/within-area"
+LIVE_URL = "https://kystdatahuset.no/ws/api/ais/realtime/geojson"
+SHIP_INFO_MMSI = "https://kystdatahuset.no/ws/api/ship/for-mmsis"
+SHIP_INFO_FREETEXT = "https://kystdatahuset.no/ws/api/ship/free-text"
+SHIP_INFO_IMO = "https://kystdatahuset.no/ws/api/ship/data/nsr/for-mmsis-imos"
+LOCATION_FREETEXT = "https://kystdatahuset.no/ws/api/location/free-text"
+SAILED_DISTANCE_MMSI = (
+    "https://kystdatahuset.no/ws/api/tracks/sailed-distance/for-ships/by-mmsi"
+)
+LOCATION_ALL = "https://kystdatahuset.no/ws/api/location/all"
+STATINFO = "https://kystdatahuset.no/ws/api/ais/statinfo/for-mmsis-time"
+LOGIN = "https://kystdatahuset.no/ws/api/auth/login"
+ARRIVALS_DEPARTURES = (
+    "https://kystdatahuset.no/ws/api/voyage/arrivals-departures/for-location"
+)
+DEPARTURES = "https://kystdatahuset.no/ws/api/voyage/departures/for-locations"
+ARRIVALS = "https://kystdatahuset.no/ws/api/voyage/arrivals/for-locations"
 
 # named tuple to pythonly deal with position array/list that some methods return
 Position = namedtuple(
@@ -142,6 +162,42 @@ class KystdatahusetAIS:
             level=Qgis.Info if not error else Qgis.Critical,
         )
 
+    def _request(self, url, method="GET", data=None):
+        try:
+            response = self.session.request(method, url, json=data)
+            response.raise_for_status()
+            result = response.json()
+            if not result["success"]:
+                raise Exception(result["msg"])
+            if result.get(
+                "msg"
+            ) is not None and "The operation has timed out." in result.get("msg"):
+                raise Exception(f"The kystdatahuset request timed out on their end")
+            if result.get("data") is None:
+                raise Exception(f"kystdatahuset returned no data")
+        except Exception as e:
+            self.messagebar(f"Error querying AIS positions: {e}", error=True)
+            raise
+            return None
+        return result.get("data")
+
+    def lookup(self, mmsi: int) -> bool:
+        "Lookup mmsi and get metadata (staticdata) if it exists, and put it in the db"
+        endpoint = SHIP_INFO_MMSI
+        data = {
+            "MmsiIds": [
+                mmsi,
+            ]
+        }
+        resp = self._request(endpoint, data=data, method="POST")
+        if len(resp) == 0:
+            # no data found
+            return False
+
+        ship = resp.pop()  # get first record
+        QgsMessageLog.logMessage(f"Found ship: {ship}")
+        return ship
+
     def login(self, username, password):
         auth_url = KDWS + "api/auth/login"
         self.session = requests.Session()
@@ -193,6 +249,9 @@ class KystdatahusetAIS:
                 return  # User canceled the input dialog
 
             settings.setValue("KDWS/last_mmsi", mmsi)
+
+            ship = self.lookup(mmsi)
+            shipname = ship.get("shipname", "Unknown")
             # Prepare the data for the AIS positions query
             data = {
                 "mmsiIds": [mmsi],
@@ -201,7 +260,9 @@ class KystdatahusetAIS:
                 # "minSpeed": 0.5,
             }
 
-            QgsMessageLog.logMessage(f"Gathering AIS positions for MMSI {mmsi}")
+            QgsMessageLog.logMessage(
+                f"Gathering AIS positions for MMSI {mmsi} / {shipname}"
+            )
             # Query the AIS positions endpoint with the access token
             api_response = session.post(api_url, data=json.dumps(data))
             api_response.raise_for_status()  # Raise an exception for 4xx or 5xx status codes
@@ -217,7 +278,7 @@ class KystdatahusetAIS:
         # Create a memory layer to display the AIS positions
         uri = (
             "Point?crs=epsg:4326&"
-            "field=name:string(20)&"
+            "field=name:string(30)&"
             "field=mmsi:integer&"
             "field=datetime_utc:date&"
             "field=course:double&"
@@ -228,7 +289,7 @@ class KystdatahusetAIS:
             "field=distance_prev_point:double&"
             "index=yes"
         )
-        vl = QgsVectorLayer(uri, "API Points", "memory")
+        vl = QgsVectorLayer(uri, f"AIS Positions for {mmsi}", "memory")
         vl.setCustomProperty("MMSI", mmsi)
         pr = vl.dataProvider()
 
@@ -274,7 +335,7 @@ class KystdatahusetAIS:
             )
             feature.setAttributes(
                 [
-                    None,
+                    shipname,
                     pos.mmsi,
                     pos.date_time_utc,
                     pos.COG,
