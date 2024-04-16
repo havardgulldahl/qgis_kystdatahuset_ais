@@ -1,6 +1,9 @@
+from collections import namedtuple
 import json
+import datetime
 
 import requests
+
 from qgis.core import (
     Qgis,
     QgsFeature,
@@ -27,6 +30,13 @@ from qgis.PyQt.QtWidgets import (
 )
 
 KDWS = "https://kystdatahuset.no/ws/"
+
+# named tuple to pythonly deal with position array/list that some methods return
+Position = namedtuple(
+    "Position",
+    field_names="mmsi, date_time_utc, longitude, latitude, COG, SOG, ais_msg_type, calc_speed, sec_prevpoint, dist_prevpoint",
+    module="kystdatahuset",
+)
 
 
 class MyPluginOptionsFactory(QgsOptionsWidgetFactory):
@@ -187,10 +197,11 @@ class KystdatahusetAIS:
             data = {
                 "mmsiIds": [mmsi],
                 "start": "201901011345",
-                "end": "201902011345",
+                "end": "201901021345",
                 # "minSpeed": 0.5,
             }
 
+            QgsMessageLog.logMessage(f"Gathering AIS positions for MMSI {mmsi}")
             # Query the AIS positions endpoint with the access token
             api_response = session.post(api_url, data=json.dumps(data))
             api_response.raise_for_status()  # Raise an exception for 4xx or 5xx status codes
@@ -206,7 +217,6 @@ class KystdatahusetAIS:
         # Create a memory layer to display the AIS positions
         uri = (
             "Point?crs=epsg:4326&"
-            "field=id:integer&"
             "field=name:string(20)&"
             "field=mmsi:integer&"
             "field=datetime_utc:date&"
@@ -225,7 +235,6 @@ class KystdatahusetAIS:
         # Add fields to the layer
         pr.addAttributes(
             [
-                QgsField("id", QVariant.Int),
                 QgsField("name", QVariant.String),
                 QgsField("mmsi", QVariant.Int),
                 QgsField("datetime_utc", QVariant.Date),
@@ -238,14 +247,46 @@ class KystdatahusetAIS:
             ]
         )
         vl.updateFields()
-
+        """
+            [
+            258500000,
+            "2019-01-02T00:00:02",
+            21.7261,
+            70.4006,
+            115.3,
+            15.1,
+            3,
+            40.8,
+            1,
+            21
+            ],
+        """
         # Iterate over the JSON data and add features to the layer
-        for row in result:
-            QgsMessageLog.logMessage(row)
+        for row in positions:
+            try:
+                pos = Position(*row)
+            except Exception as e:
+                QgsMessageLog.logMessage(f"Error creating Position: {e}")
+                continue
             feature = QgsFeature()
-            feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(row["x"], row["y"])))
-            feature.setAttributes([row["id"], row["name"], row["value"]])
+            feature.setGeometry(
+                QgsGeometry.fromPointXY(QgsPointXY(pos.longitude, pos.latitude))
+            )
+            feature.setAttributes(
+                [
+                    None,
+                    pos.mmsi,
+                    pos.date_time_utc,
+                    pos.COG,
+                    pos.SOG,
+                    pos.ais_msg_type,
+                    pos.calc_speed,
+                    pos.sec_prevpoint,
+                    pos.dist_prevpoint,
+                ]
+            )
             pr.addFeatures([feature])
+            # QgsMessageLog.logMessage(f"Added feature for MMSI {pos.mmsi}")
 
         # Update the layer's extent
         vl.updateExtents()
