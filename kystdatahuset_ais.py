@@ -1,9 +1,9 @@
-from collections import namedtuple
-import json
 import datetime
+import json
+from collections import namedtuple
+from typing import Optional
 
 import requests
-
 from qgis.core import (
     Qgis,
     QgsFeature,
@@ -16,15 +16,19 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.gui import QgsOptionsPageWidget, QgsOptionsWidgetFactory
-from qgis.PyQt.QtCore import QCoreApplication, QVariant
+from qgis.PyQt.QtCore import QCoreApplication, QDate, QVariant
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
     QAction,
+    QDateTimeEdit,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPushButton,
+    QSpinBox,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -57,6 +61,11 @@ Position = namedtuple(
     field_names="mmsi, date_time_utc, longitude, latitude, COG, SOG, ais_msg_type, calc_speed, sec_prevpoint, dist_prevpoint",
     module="kystdatahuset",
 )
+
+
+def dateformatter(dt: datetime) -> str:
+    "Format dates the way kystdatahuset likes them: YYYYMMDDHHmm"
+    return dt.strftime("%Y%m%d%H%M")
 
 
 class MyPluginOptionsFactory(QgsOptionsWidgetFactory):
@@ -132,27 +141,74 @@ class KystdatahusetAIS:
         self.session = None
 
     def initGui(self):
-        self.action = QAction("Get Kystdatahuset AIS", self.iface.mainWindow())
-        self.action.triggered.connect(self.run)
-        self.iface.addToolBarIcon(self.action)
+        # Create a toolbar
+        self.toolbar = QToolBar("Kystdatahuset AIS")
+        self.toolbar.setObjectName("KystdatahusetAISToolbar")
+        self.iface.addToolBar(self.toolbar)
+
+        # Create a widget to hold the toolbar items
+        self.toolbar_widget = QWidget()
+        self.toolbar_layout = QHBoxLayout()
+        self.toolbar_widget.setLayout(self.toolbar_layout)
+        # Create a label for MMSI
+        self.mmsi_label = QLabel("MMSI: ")
+        self.toolbar_layout.addWidget(self.mmsi_label)
+
+        # Create an integer spin box
+        self.mmsi_spinbox = QSpinBox()
+        settings = QgsSettings()
+        last_mmsi = int(settings.value("KDWS/last_mmsi", 0))
+        self.mmsi_spinbox.setValue(last_mmsi)
+        self.mmsi_spinbox.setMinimumWidth(10)
+        self.mmsi_spinbox.setRange(1_000_000, 999_999_999)
+        self.toolbar_layout.addWidget(self.mmsi_spinbox)
+
+        # Create two date spinners
+        self.start_date_spinner = QDateTimeEdit()
+        self.start_date_spinner.setDate(QDate.currentDate())
+        self.start_date_spinner.setCalendarPopup(True)
+        self.toolbar_layout.addWidget(self.start_date_spinner)
+
+        self.end_date_spinner = QDateTimeEdit()
+        self.end_date_spinner.setDate(QDate.currentDate())
+        self.end_date_spinner.setCalendarPopup(True)
+        self.toolbar_layout.addWidget(self.end_date_spinner)
+
+        # Create a lookup button
+        self.get_ais_button = QPushButton("Get AIS Positions")
+        self.get_ais_button.clicked.connect(self.run)
+        self.toolbar_layout.addWidget(self.get_ais_button)
+
+        # Add the toolbar widget to the toolbar
+        self.toolbar.addWidget(self.toolbar_widget)
+
+        # Add the plugin to the menu
         self.iface.addPluginToMenu("Kystdatahuset", self.action)
+
+        # Register the options widget factory
         self.options_factory = MyPluginOptionsFactory()
         self.options_factory.setTitle("Kystdatahuset AIS")
         self.iface.registerOptionsWidgetFactory(self.options_factory)
 
-        # connect to signal renderComplete which is emitted when canvas
-        # rendering is done
+        # Connect to the renderComplete signal
         self.iface.mapCanvas().renderComplete.connect(self.renderTest)
 
     def tr(self, message):
         return QCoreApplication.translate("KystdatahusetAIS", message)
 
     def unload(self):
-        self.iface.removeToolBarIcon(self.action)
+        # Remove the toolbar
+        self.toolbar.deleteLater()
+        del self.toolbar
+
+        # Remove the plugin from the menu
         self.iface.removePluginMenu("Kystdatahuset", self.action)
         del self.action
+
+        # Unregister the options widget factory
         self.iface.unregisterOptionsWidgetFactory(self.options_factory)
-        # disconnect form signal of the canvas
+
+        # Disconnect from the renderComplete signal of the canvas
         self.iface.mapCanvas().renderComplete.disconnect(self.renderTest)
 
     def messagebar(self, message, error=False):
@@ -162,7 +218,7 @@ class KystdatahusetAIS:
             level=Qgis.Info if not error else Qgis.Critical,
         )
 
-    def _request(self, url, method="GET", data=None):
+    def _request(self, url, data=None, method="GET"):
         try:
             response = self.session.request(method, url, json=data)
             response.raise_for_status()
@@ -198,8 +254,26 @@ class KystdatahusetAIS:
         QgsMessageLog.logMessage(f"Found ship: {ship}")
         return ship
 
+    def get_positions(
+        self,
+        mmsi: int = None,
+        fromDate: Optional[datetime.datetime] = None,
+        toDate: Optional[datetime.datetime] = None,
+    ):
+        if not all([fromDate, toDate]):
+            raise Exception("Missing fromdate and todate")
+        # historic url for a vessel, with timespan
+        endpoint = POSITIONS_MMSI
+        data = {
+            "MmsiIds": [mmsi],
+            "Start": dateformatter(fromDate),  # type: ignore
+            "End": dateformatter(toDate),  # type: ignore
+        }
+        response = self._request(endpoint, data, method="POST")
+        return [Position(*row) for row in response]
+
     def login(self, username, password):
-        auth_url = KDWS + "api/auth/login"
+        auth_url = LOGIN
         self.session = requests.Session()
         try:
             # Authenticate and get the access token
@@ -229,51 +303,37 @@ class KystdatahusetAIS:
         QgsMessageLog.logMessage("TestPlugin: renderTest called!")
 
     def run(self):
+        # Get the values from the integer spin box and date spinners
+        mmsi = self.mmsi_spinbox.value()
+        start_date = self.start_date_spinner.dateTime().toPyDateTime()
+        end_date = self.end_date_spinner.dateTime().toPyDateTime()
+
         settings = QgsSettings()
+        settings.setValue("KDWS/last_mmsi", mmsi)
+
+        # Perform the lookup based on the selected values
+        # Add your lookup logic here
+        QgsMessageLog.logMessage(
+            f"Lookup: Integer = {mmsi}, Start Date = {start_date}, End Date = {end_date}"
+        )
+
         username = settings.value("KDWS/username", "")
         password = settings.value("KDWS/password", "")
         if self.session is None:
-            session = self.login(username, password)
-        else:
-            session = self.session
+            self.login(username, password)
 
-        api_url = KDWS + "api/ais/positions/for-mmsis-time"
         settings = QgsSettings()
-        last_mmsi = settings.value("KDWS/last_mmsi", 0)
         try:
-            # Prompt the user to enter the MMSI
-            mmsi, ok = QInputDialog.getInt(
-                None, "Enter MMSI", "Please enter the MMSI:", last_mmsi
-            )
-            if not ok:
-                return  # User canceled the input dialog
-
-            settings.setValue("KDWS/last_mmsi", mmsi)
-
             ship = self.lookup(mmsi)
             shipname = ship.get("shipname", "Unknown")
-            # Prepare the data for the AIS positions query
-            data = {
-                "mmsiIds": [mmsi],
-                "start": "201901011345",
-                "end": "201901021345",
-                # "minSpeed": 0.5,
-            }
-
             QgsMessageLog.logMessage(
                 f"Gathering AIS positions for MMSI {mmsi} / {shipname}"
             )
-            # Query the AIS positions endpoint with the access token
-            api_response = session.post(api_url, data=json.dumps(data))
-            api_response.raise_for_status()  # Raise an exception for 4xx or 5xx status codes
-            result = api_response.json()
-            if not result["success"]:
-                raise Exception(result["msg"])
+            positions = self.get_positions(mmsi, start_date, end_date)
         except Exception as e:
             self.messagebar(f"Error querying AIS positions: {e}", error=True)
             return
 
-        positions = result["data"]
         QgsMessageLog.logMessage(f"Received {len(positions)} positions for MMSI {mmsi}")
         # Create a memory layer to display the AIS positions
         uri = (
