@@ -9,10 +9,13 @@ from qgis.core import (
     QgsFeature,
     QgsField,
     QgsGeometry,
+    QgsMarkerSymbol,
     QgsMessageLog,
     QgsPointXY,
     QgsProject,
+    QgsRuleBasedRenderer,
     QgsSettings,
+    QgsSymbol,
     QgsVectorLayer,
 )
 from qgis.gui import QgsOptionsPageWidget, QgsOptionsWidgetFactory
@@ -428,6 +431,39 @@ class KystdatahusetAIS:
 
         # Update the layer's extent
         vl.updateExtents()
+
+        # Define the symbology rules
+        rules = [
+            {
+                "filter": '"speed" < 2',
+                "symbol": QgsMarkerSymbol.createSimple(
+                    {"name": "circle", "color": "red", "size": "6"}
+                ),
+            },
+            {
+                "filter": '"speed" >= 2',
+                "symbol": QgsMarkerSymbol.createSimple(
+                    {"name": "circle", "color": "blue", "size": "3"}
+                ),
+            },
+        ]
+
+        # Create a rule-based renderer and assign the rules
+        renderer = QgsRuleBasedRenderer(QgsSymbol.defaultSymbol(vl.geometryType()))
+        root_rule = renderer.rootRule()
+
+        for rule in rules:
+            label = f"""Speed {"<" if rule["filter"].startswith('"speed" <') else ">="} 2 knots"""
+            expression = rule["filter"]
+            symbol = rule["symbol"]
+            new_rule = root_rule.children()[0].clone()
+            new_rule.setLabel(label)
+            new_rule.setFilterExpression(expression)
+            new_rule.setSymbol(symbol)
+            root_rule.appendChild(new_rule)
+
+        root_rule.removeChildAt(0)
+        vl.setRenderer(renderer)
 
         # If the layer is not in the project, add the layer to the project
         if vl not in QgsProject.instance().mapLayers().values():
