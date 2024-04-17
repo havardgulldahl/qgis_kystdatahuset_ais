@@ -259,12 +259,10 @@ class KystdatahusetAIS:
 
     def get_positions(
         self,
-        mmsi: int = None,
-        fromDate: Optional[datetime.datetime] = None,
-        toDate: Optional[datetime.datetime] = None,
+        mmsi: int,
+        fromDate: datetime.datetime,
+        toDate: datetime.datetime,
     ) -> List[Position]:
-        if not all([fromDate, toDate]):
-            raise Exception("Missing fromdate and todate")
         # historic url for a vessel, with timespan
         endpoint = POSITIONS_MMSI
         data = {
@@ -307,40 +305,49 @@ class KystdatahusetAIS:
 
     def run(self):
         # Get the values from the integer spin box and date spinners
-        mmsi = self.mmsi_spinbox.value()
+        mmsi: int = self.mmsi_spinbox.value()
         start_date = self.start_date_spinner.dateTime().toPyDateTime()
         end_date = self.end_date_spinner.dateTime().toPyDateTime()
 
+        # check if start_date is before end_date
+        if start_date > end_date:
+            QMessageBox.critical(
+                None,
+                "Error",
+                "The start date must be before the end date",
+                QMessageBox.Ok,
+            )
+            return
+
         settings = QgsSettings()
         settings.setValue("KDWS/last_mmsi", mmsi)
-
-        # Perform the lookup based on the selected values
-        # Add your lookup logic here
-        QgsMessageLog.logMessage(
-            f"Lookup: Integer = {mmsi}, Start Date = {start_date}, End Date = {end_date}"
-        )
-
         username = settings.value("KDWS/username", "")
         password = settings.value("KDWS/password", "")
         if self.session is None:
             self.login(username, password)
 
-        settings = QgsSettings()
+        # get ship info
+        ship = self.lookup(mmsi)
+        shipname = ship.get("shipname", None)
+        QgsMessageLog.logMessage(
+            f"Gathering AIS positions for MMSI {mmsi} / {shipname or 'Unknown'}"
+        )
         try:
-            ship = self.lookup(mmsi)
-            shipname = ship.get("shipname", None)
-            QgsMessageLog.logMessage(
-                f"Gathering AIS positions for MMSI {mmsi} / {shipname or 'Unknown'}"
-            )
-            positions = self.get_positions(mmsi, start_date, end_date)
+            interval_start = start_date
+            while interval_start < end_date:
+                interval_end = min(
+                    interval_start + datetime.timedelta(days=6), end_date
+                )
+                positions = self.get_positions(mmsi, interval_start, interval_end)
+                self.messagebar(
+                    f"Received {len(positions)} AIS positions for {shipname or mmsi}"
+                )
+                self.add_layer(mmsi, ship, positions)
+                interval_start = interval_end
+
         except Exception as e:
             self.messagebar(f"Error querying AIS positions: {e}", error=True)
             return
-
-        self.messagebar(
-            f"Received {len(positions)} AIS positions for {shipname or mmsi}"
-        )
-        self.add_layer(mmsi, ship, positions)
 
     def add_layer(self, mmsi: int, ship: dict, positions: List[Position]):
         # Find an existing layer with the same MMSI or create a new one
