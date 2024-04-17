@@ -1,7 +1,7 @@
 import datetime
 import json
 from collections import namedtuple
-from typing import Optional
+from typing import List, Optional
 
 import requests
 from qgis.core import (
@@ -160,7 +160,7 @@ class KystdatahusetAIS:
         last_mmsi = int(settings.value("KDWS/last_mmsi", 0))
         self.mmsi_spinbox.setValue(last_mmsi)
         self.mmsi_spinbox.setMinimumWidth(10)
-        self.mmsi_spinbox.setRange(1_000_000_000, 999_999_999_999)
+        self.mmsi_spinbox.setRange(1_000_000, 999_999_999)
         self.toolbar_layout.addWidget(self.mmsi_spinbox)
 
         # Create two date spinners
@@ -193,7 +193,7 @@ class KystdatahusetAIS:
         # Connect to the renderComplete signal
         self.iface.mapCanvas().renderComplete.connect(self.renderTest)
 
-    def tr(self, message):
+    def tr(self, message: str) -> str:
         return QCoreApplication.translate("KystdatahusetAIS", message)
 
     def unload(self):
@@ -218,7 +218,7 @@ class KystdatahusetAIS:
             level=Qgis.Info if not error else Qgis.Critical,
         )
 
-    def _request(self, url, data=None, method="GET"):
+    def _request(self, url, data=None, method="GET") -> list:
         try:
             response = self.session.request(method, url, json=data)
             response.raise_for_status()
@@ -237,7 +237,7 @@ class KystdatahusetAIS:
             return None
         return result.get("data")
 
-    def lookup(self, mmsi: int) -> bool:
+    def lookup(self, mmsi: int) -> dict:
         "Lookup mmsi and get metadata (staticdata) if it exists, and put it in the db"
         endpoint = SHIP_INFO_MMSI
         data = {
@@ -259,7 +259,7 @@ class KystdatahusetAIS:
         mmsi: int = None,
         fromDate: Optional[datetime.datetime] = None,
         toDate: Optional[datetime.datetime] = None,
-    ):
+    ) -> List[Position]:
         if not all([fromDate, toDate]):
             raise Exception("Missing fromdate and todate")
         # historic url for a vessel, with timespan
@@ -335,60 +335,70 @@ class KystdatahusetAIS:
             return
 
         QgsMessageLog.logMessage(f"Received {len(positions)} positions for MMSI {mmsi}")
-        # Create a memory layer to display the AIS positions
-        uri = (
-            "Point?crs=epsg:4326&"
-            "field=name:string(30)&"
-            "field=mmsi:integer&"
-            "field=datetime_utc:date&"
-            "field=course:double&"
-            "field=speed:double&"
-            "field=AIS_message_number:integer&"
-            "field=calc_speed:double&"
-            "field=seconds_prev_point:double&"
-            "field=distance_prev_point:double&"
-            "index=yes"
-        )
-        vl = QgsVectorLayer(uri, f"AIS Positions for {mmsi}", "memory")
-        vl.setCustomProperty("MMSI", mmsi)
-        pr = vl.dataProvider()
+        self.add_layer(mmsi, shipname, positions)
 
-        # Add fields to the layer
-        pr.addAttributes(
-            [
-                QgsField("name", QVariant.String),
-                QgsField("mmsi", QVariant.Int),
-                QgsField("datetime_utc", QVariant.Date),
-                QgsField("course", QVariant.Double),
-                QgsField("speed", QVariant.Double),
-                QgsField("AIS_message_number", QVariant.Int),
-                QgsField("calc_speed", QVariant.Double),
-                QgsField("seconds_prev_point", QVariant.Double),
-                QgsField("distance_prev_point", QVariant.Double),
-            ]
-        )
-        vl.updateFields()
-        """
-            [
-            258500000,
-            "2019-01-02T00:00:02",
-            21.7261,
-            70.4006,
-            115.3,
-            15.1,
-            3,
-            40.8,
-            1,
-            21
-            ],
-        """
+    def add_layer(self, mmsi: int, shipname: str, positions: List[Position]):
+        # Find an existing layer with the same MMSI or create a new one
+        vl = pr = None
+        for layer in QgsProject.instance().mapLayers().values():
+            if layer.customProperty("MMSI") == mmsi:
+                QgsMessageLog.logMessage("Layer already exists")
+                vl = layer
+                pr = vl.dataProvider()
+                break
+
+        if vl is None:
+            # Create a memory layer to display the AIS positions
+            new_layer = True
+            uri = (
+                "Point?crs=epsg:4326&"
+                "field=name:string(30)&"
+                "field=mmsi:integer&"
+                "field=datetime_utc:date&"
+                "field=course:double&"
+                "field=speed:double&"
+                "field=AIS_message_number:integer&"
+                "field=calc_speed:double&"
+                "field=seconds_prev_point:double&"
+                "field=distance_prev_point:double&"
+                "index=yes"
+            )
+            vl = QgsVectorLayer(uri, f"AIS Positions for {mmsi}", "memory")
+            vl.setCustomProperty("MMSI", mmsi)
+
+            pr = vl.dataProvider()
+
+            # Add fields to the layer
+            pr.addAttributes(
+                [
+                    QgsField("name", QVariant.String),
+                    QgsField("mmsi", QVariant.Int),
+                    QgsField("datetime_utc", QVariant.Date),
+                    QgsField("course", QVariant.Double),
+                    QgsField("speed", QVariant.Double),
+                    QgsField("AIS_message_number", QVariant.Int),
+                    QgsField("calc_speed", QVariant.Double),
+                    QgsField("seconds_prev_point", QVariant.Double),
+                    QgsField("distance_prev_point", QVariant.Double),
+                ]
+            )
+            vl.updateFields()
+            """
+                [
+                258500000,
+                "2019-01-02T00:00:02",
+                21.7261,
+                70.4006,
+                115.3,
+                15.1,
+                3,
+                40.8,
+                1,
+                21
+                ],
+            """
         # Iterate over the JSON data and add features to the layer
-        for row in positions:
-            try:
-                pos = Position(*row)
-            except Exception as e:
-                QgsMessageLog.logMessage(f"Error creating Position: {e}")
-                continue
+        for pos in positions:
             feature = QgsFeature()
             feature.setGeometry(
                 QgsGeometry.fromPointXY(QgsPointXY(pos.longitude, pos.latitude))
@@ -412,6 +422,7 @@ class KystdatahusetAIS:
         # Update the layer's extent
         vl.updateExtents()
 
-        # Add the layer to the project
-        QgsProject.instance().addMapLayer(vl)
-        QgsMessageLog.logMessage("Layer added to project")
+        # If the layer is not in the project, add the layer to the project
+        if vl not in QgsProject.instance().mapLayers().values():
+            QgsProject.instance().addMapLayer(vl)
+            QgsMessageLog.logMessage("Layer added to project")
