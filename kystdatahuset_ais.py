@@ -160,7 +160,7 @@ class KystdatahusetAIS:
         last_mmsi = int(settings.value("KDWS/last_mmsi", 0))
         self.mmsi_spinbox.setValue(last_mmsi)
         self.mmsi_spinbox.setMinimumWidth(10)
-        self.mmsi_spinbox.setRange(1_000_000, 999_999_999)
+        self.mmsi_spinbox.setRange(1_000_000_000, 999_999_999_999)
         self.toolbar_layout.addWidget(self.mmsi_spinbox)
 
         # Create two date spinners
