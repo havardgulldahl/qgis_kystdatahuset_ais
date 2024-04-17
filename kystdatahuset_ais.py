@@ -17,10 +17,19 @@ from qgis.core import (
     QgsSettings,
     QgsSymbol,
     QgsVectorLayer,
+    QgsNetworkAccessManager,
 )
 from qgis.gui import QgsOptionsPageWidget, QgsOptionsWidgetFactory
-from qgis.PyQt.QtCore import QCoreApplication, QDate, QVariant
+from qgis.PyQt.QtCore import (
+    QCoreApplication,
+    QDate,
+    QEventLoop,
+    QJsonDocument,
+    QUrl,
+    QVariant,
+)
 from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from qgis.PyQt.QtWidgets import (
     QAction,
     QDateTimeEdit,
@@ -142,6 +151,9 @@ class KystdatahusetAIS:
         self.iface = iface
         self.action = None
         self.session = None
+        self.token = None
+        self.nam = QgsNetworkAccessManager()
+        self.nam.setTimeout(15 * 1000)  # milliseconds
 
     def initGui(self):
         # Create a toolbar
@@ -222,6 +234,45 @@ class KystdatahusetAIS:
         )
 
     def _request(self, url, data=None, method="GET") -> list:
+        request = QNetworkRequest(QUrl(url))
+        request.setRawHeader(b"Content-Type", b"application/json")
+        request.setRawHeader(b"Accept", b"application/json")
+        request.setRawHeader(b"Authorization", f"Bearer {self.token}".encode())
+
+        if method == "GET":
+            reply = self.nam.blockingGet(request)
+        elif method == "POST":
+            json_data = QJsonDocument(data).toJson()
+            reply = self.nam.blockingPost(request, json_data)
+        else:
+            raise Exception(f"Unsupported HTTP method: {method}")
+
+        status_code = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+        if status_code != 200:
+            self.messagebar(f"Error querying AIS positions: {status_code}", error=True)
+            raise Exception(f"Error querying AIS positions: {status_code}")
+
+        if reply.error() != QNetworkReply.NoError:
+            error_msg = reply.errorString()
+            self.messagebar(f"Error querying AIS positions: {error_msg}", error=True)
+            raise Exception(error_msg)
+
+        result = json.loads(bytes(reply.content()))
+
+        if not result["success"]:
+            raise Exception(result["msg"])
+
+        if result.get(
+            "msg"
+        ) is not None and "The operation has timed out." in result.get("msg"):
+            raise Exception("The kystdatahuset request timed out on their end")
+
+        if result.get("data") is None:
+            raise Exception("kystdatahuset returned no data")
+
+        return result.get("data")
+
+    def _request_py(self, url, data=None, method="GET") -> list:
         try:
             response = self.session.request(method, url, json=data)
             response.raise_for_status()
@@ -286,6 +337,7 @@ class KystdatahusetAIS:
             if not result["success"]:
                 raise Exception(result["msg"])
             access_token = result["data"]["JWT"]
+            self.token = access_token
             # Include the access token in the headers for subsequent requests
             headers = {
                 "Content-Type": "application/json",
@@ -450,7 +502,7 @@ class KystdatahusetAIS:
             {
                 "filter": '"speed" >= 2',
                 "symbol": QgsMarkerSymbol.createSimple(
-                    {"name": "circle", "color": "blue", "size": "3"}
+                    {"name": "circle", "color": "#339cff", "size": "3"}
                 ),
             },
         ]
