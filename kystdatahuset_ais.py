@@ -325,16 +325,18 @@ class KystdatahusetAIS:
         settings = QgsSettings()
         try:
             ship = self.lookup(mmsi)
-            shipname = ship.get("shipname", "Unknown")
+            shipname = ship.get("shipname", None)
             QgsMessageLog.logMessage(
-                f"Gathering AIS positions for MMSI {mmsi} / {shipname}"
+                f"Gathering AIS positions for MMSI {mmsi} / {shipname or 'Unknown'}"
             )
             positions = self.get_positions(mmsi, start_date, end_date)
         except Exception as e:
             self.messagebar(f"Error querying AIS positions: {e}", error=True)
             return
 
-        QgsMessageLog.logMessage(f"Received {len(positions)} positions for MMSI {mmsi}")
+        self.messagebar(
+            f"Received {len(positions)} AIS positions for {shipname or mmsi}"
+        )
         self.add_layer(mmsi, ship, positions)
 
     def add_layer(self, mmsi: int, ship: dict, positions: List[Position]):
@@ -410,7 +412,7 @@ class KystdatahusetAIS:
             )
             feature.setAttributes(
                 [
-                    shipname,
+                    ship.get("shipname", None),
                     pos.mmsi,
                     pos.date_time_utc,
                     pos.COG,
