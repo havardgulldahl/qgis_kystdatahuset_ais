@@ -335,11 +335,12 @@ class KystdatahusetAIS:
             return
 
         QgsMessageLog.logMessage(f"Received {len(positions)} positions for MMSI {mmsi}")
-        self.add_layer(mmsi, shipname, positions)
+        self.add_layer(mmsi, ship, positions)
 
-    def add_layer(self, mmsi: int, shipname: str, positions: List[Position]):
+    def add_layer(self, mmsi: int, ship: dict, positions: List[Position]):
         # Find an existing layer with the same MMSI or create a new one
         vl = pr = None
+        shipname = ship.get("shipname", None)
         for layer in QgsProject.instance().mapLayers().values():
             if layer.customProperty("MMSI") == mmsi:
                 QgsMessageLog.logMessage("Layer already exists")
@@ -349,12 +350,11 @@ class KystdatahusetAIS:
 
         if vl is None:
             # Create a memory layer to display the AIS positions
-            new_layer = True
             uri = (
                 "Point?crs=epsg:4326&"
                 "field=name:string(30)&"
                 "field=mmsi:integer&"
-                "field=datetime_utc:date&"
+                "field=datetime_utc:datetime&"
                 "field=course:double&"
                 "field=speed:double&"
                 "field=AIS_message_number:integer&"
@@ -363,8 +363,13 @@ class KystdatahusetAIS:
                 "field=distance_prev_point:double&"
                 "index=yes"
             )
-            vl = QgsVectorLayer(uri, f"AIS Positions for {mmsi}", "memory")
+            vl = QgsVectorLayer(uri, f"AIS Positions for {shipname or mmsi}", "memory")
             vl.setCustomProperty("MMSI", mmsi)
+            vl.setCustomProperty("shipname", shipname)
+            vl.setCustomProperty("flag", ship.get("threecharcode", "Unknown"))
+            vl.setCustomProperty("imo", ship.get("imono", "Unknown"))
+            vl.setCustomProperty("callsign", ship.get("callsign", "Unknown"))
+            vl.setCustomProperty("shiptype", ship.get("shiptypegroupnor", "Unknown"))
 
             pr = vl.dataProvider()
 
@@ -373,7 +378,7 @@ class KystdatahusetAIS:
                 [
                     QgsField("name", QVariant.String),
                     QgsField("mmsi", QVariant.Int),
-                    QgsField("datetime_utc", QVariant.Date),
+                    QgsField("datetime_utc", QVariant.DateTime),
                     QgsField("course", QVariant.Double),
                     QgsField("speed", QVariant.Double),
                     QgsField("AIS_message_number", QVariant.Int),
