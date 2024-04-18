@@ -6,18 +6,20 @@ from typing import List, Optional
 import requests
 from qgis.core import (
     Qgis,
+    QgsApplication,
     QgsFeature,
     QgsField,
     QgsGeometry,
     QgsMarkerSymbol,
     QgsMessageLog,
+    QgsNetworkAccessManager,
     QgsPointXY,
     QgsProject,
     QgsRuleBasedRenderer,
     QgsSettings,
     QgsSymbol,
+    QgsTask,
     QgsVectorLayer,
-    QgsNetworkAccessManager,
 )
 from qgis.gui import QgsOptionsPageWidget, QgsOptionsWidgetFactory
 from qgis.PyQt.QtCore import (
@@ -146,6 +148,93 @@ class ConfigOptionsPage(QgsOptionsPageWidget):
         self.password_input.setText(password)
 
 
+MESSAGE_CATEGORY = "KystdatahusetAIS"
+
+
+class RequestTask(QgsTask):
+    def __init__(self, description, url, nam, data=None, token=None, method="GET"):
+        super().__init__(description, QgsTask.CanCancel)
+        self.url = url
+        self.data = data
+        self.method = method
+        self.token = token
+        self.nam = nam
+        self.result = None
+        self.exception = None
+
+    def run(self):
+        QgsMessageLog.logMessage(
+            'Started task "{}"'.format(self.description()), MESSAGE_CATEGORY, Qgis.Info
+        )
+        request = QNetworkRequest(QUrl(self.url))
+        request.setRawHeader(b"Content-Type", b"application/json")
+        request.setRawHeader(b"Accept", b"application/json")
+        if self.token is not None:
+            request.setRawHeader(b"Authorization", f"Bearer {self.token}".encode())
+
+        if self.method == "GET":
+            reply = self.nam.blockingGet(request)
+        elif self.method == "POST":
+            json_data = QJsonDocument(self.data).toJson()
+            reply = self.nam.blockingPost(request, json_data)
+        else:
+            self.exception = Exception(f"Unsupported HTTP method: {self.method}")
+            return False
+
+        while not reply.isFinished():
+            if self.isCanceled():
+                return False
+            QgsApplication.processEvents()
+
+        if reply.error() != QNetworkReply.NoError:
+            self.exception = Exception(reply.errorString())
+            return False
+
+        result = json.loads(bytes(reply.content()))
+
+        if not result["success"]:
+            self.exception = Exception(result["msg"])
+            return False
+
+        if result.get(
+            "msg"
+        ) is not None and "The operation has timed out." in result.get("msg"):
+            self.exception = Exception(
+                "The kystdatahuset request timed out on their end"
+            )
+            return False
+
+        if result.get("data") is None:
+            self.exception = Exception("kystdatahuset returned no data")
+            return False
+
+        self.result = result.get("data")
+        return True
+
+    def finished(self, result):
+        if result:
+            QgsMessageLog.logMessage(
+                f'Request task "{self.description()}" completed successfully',
+                "RequestTask",
+                Qgis.Success,
+            )
+        else:
+            QgsMessageLog.logMessage(
+                f'Request task "{self.description()}" failed with exception: {self.exception}',
+                "RequestTask",
+                Qgis.Critical,
+            )
+            raise self.exception
+
+    def cancel(self):
+        QgsMessageLog.logMessage(
+            'RandomTask "{name}" was canceled'.format(name=self.description()),
+            MESSAGE_CATEGORY,
+            Qgis.Info,
+        )
+        super().cancel()
+
+
 class KystdatahusetAIS:
     def __init__(self, iface):
         self.iface = iface
@@ -175,7 +264,7 @@ class KystdatahusetAIS:
         last_mmsi = int(settings.value("KDWS/last_mmsi", 0))
         self.mmsi_spinbox.setValue(last_mmsi)
         self.mmsi_spinbox.setMinimumWidth(10)
-        self.mmsi_spinbox.setRange(1_000_000, 999_999_999)
+        self.mmsi_spinbox.setRange(100_000_000, 999_999_999)
         self.toolbar_layout.addWidget(self.mmsi_spinbox)
 
         # Create two date spinners
@@ -206,7 +295,7 @@ class KystdatahusetAIS:
         self.iface.registerOptionsWidgetFactory(self.options_factory)
 
         # Connect to the renderComplete signal
-        self.iface.mapCanvas().renderComplete.connect(self.renderTest)
+        # self.iface.mapCanvas().renderComplete.connect(self.renderTest)
 
     def tr(self, message: str) -> str:
         return QCoreApplication.translate("KystdatahusetAIS", message)
@@ -224,7 +313,7 @@ class KystdatahusetAIS:
         self.iface.unregisterOptionsWidgetFactory(self.options_factory)
 
         # Disconnect from the renderComplete signal of the canvas
-        self.iface.mapCanvas().renderComplete.disconnect(self.renderTest)
+        # self.iface.mapCanvas().renderComplete.disconnect(self.renderTest)
 
     def messagebar(self, message, error=False):
         self.iface.messageBar().pushMessage(
@@ -233,7 +322,12 @@ class KystdatahusetAIS:
             level=Qgis.Info if not error else Qgis.Critical,
         )
 
-    def _request(self, url, data=None, method="GET") -> list:
+    def _request_task(self, url, data=None, method="GET") -> list:
+        task = RequestTask(f"Request to {url}", url, self.nam, self.token, data, method)
+        QgsApplication.taskManager().addTask(task)
+        return task.result
+
+    def _request_blocking(self, url, data=None, method="GET") -> list:
         request = QNetworkRequest(QUrl(url))
         request.setRawHeader(b"Content-Type", b"application/json")
         request.setRawHeader(b"Accept", b"application/json")
@@ -290,6 +384,8 @@ class KystdatahusetAIS:
             raise
             return None
         return result.get("data")
+
+    _request = _request_py
 
     def lookup(self, mmsi: int) -> dict:
         "Lookup mmsi and get metadata (staticdata) if it exists, and put it in the db"
@@ -351,9 +447,9 @@ class KystdatahusetAIS:
             self.messagebar(f"Error authenticating: {e}", error=True)
         return self.session
 
-    def renderTest(self, painter):
-        # use painter for drawing to map canvas
-        QgsMessageLog.logMessage("TestPlugin: renderTest called!")
+    # def renderTest(self, painter):
+    ## use painter for drawing to map canvas
+    # QgsMessageLog.logMessage("TestPlugin: renderTest called!")
 
     def run(self):
         # Get the values from the integer spin box and date spinners
