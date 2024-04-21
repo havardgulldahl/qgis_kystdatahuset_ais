@@ -12,8 +12,8 @@ email=havard.gulldahl@nrk.no
 
 about=A plugin to fetch AIS by MMSI or IMO and put positions or tracks on the map.
 
-tracker=http://bugs
-repository=http://repo
+tracker=https://github.com/havardgulldahl/qgis_kystdatahuset_ais/issues
+repository=https://github.com/havardgulldahl/qgis_kystdatahuset_ais
 # End of mandatory metadata
 
 # Recommended items:
@@ -25,7 +25,7 @@ hasProcessingProvider=no
 # Tags are comma separated with spaces allowed
 tags=ais
 
-homepage=http://homepage
+homepage=https://github.com/havardgulldahl/qgis_kystdatahuset_ais
 category=Web
 icon=icon.png
 # experimental flag
