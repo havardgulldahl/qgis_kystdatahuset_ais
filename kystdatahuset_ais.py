@@ -475,8 +475,12 @@ class KystdatahusetAIS:
             self.login(username, password)
 
         # get ship info
-        ship = self.lookup(mmsi)
-        shipname = ship.get("shipname", None)
+        try:
+            ship = self.lookup(mmsi)
+            shipname = ship.get("shipname", None)
+        except AttributeError:
+            ship = None
+            shipname = "Unknown"
         QgsMessageLog.logMessage(
             f"Gathering AIS positions for MMSI {mmsi} / {shipname or 'Unknown'}"
         )
